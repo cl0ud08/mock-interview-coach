@@ -1,40 +1,32 @@
-from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
+from sqlalchemy.orm import Session as DbSession
 
-from fastapi import APIRouter, HTTPException, status
-
-from app.schemas.session import SessionCreate, SessionOut, SessionStatus
+from app.database import get_db
+from app.models import Session as SessionModel
+from app.schemas.session import SessionCreate, SessionOut
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
-# Temporary in-memory store — replaced by Postgres on D3.
-_sessions: dict[int, dict] = {}
-_next_id = 1
-
 
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
-def create_session(payload: SessionCreate) -> SessionOut:
-    global _next_id
-    record = {
-        "id": _next_id,
-        "role": payload.role,
-        "job_description": payload.job_description,
-        "status": SessionStatus.created,
-        "created_at": datetime.now(timezone.utc),
-        "question_count": 0,
-    }
-    _sessions[_next_id] = record
-    _next_id += 1
-    return SessionOut(**record)
+def create_session(payload: SessionCreate, db: DbSession = Depends(get_db)) -> SessionOut:
+    session = SessionModel(role=payload.role, job_description=payload.job_description)
+    db.add(session)
+    db.commit()
+    db.refresh(session)          # reload so id and created_at are populated
+    return SessionOut.model_validate(session)
 
 
 @router.get("", response_model=list[SessionOut])
-def list_sessions() -> list[SessionOut]:
-    return [SessionOut(**r) for r in _sessions.values()]
+def list_sessions(db: DbSession = Depends(get_db)) -> list[SessionOut]:
+    rows = db.execute(select(SessionModel).order_by(SessionModel.created_at.desc())).scalars().all()
+    return [SessionOut.model_validate(r) for r in rows]
 
 
 @router.get("/{session_id}", response_model=SessionOut)
-def get_session(session_id: int) -> SessionOut:
-    record = _sessions.get(session_id)
-    if record is None:
+def get_session(session_id: int, db: DbSession = Depends(get_db)) -> SessionOut:
+    session = db.get(SessionModel, session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return SessionOut(**record)
+    return SessionOut.model_validate(session)
